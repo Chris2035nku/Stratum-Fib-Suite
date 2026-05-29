@@ -1,4 +1,7 @@
 # Stratum-Fib-Suite
+
+<img width="2317" height="1027" alt="image" src="https://github.com/user-attachments/assets/d4f9029f-7be4-4834-9d9d-69dd21129fd6" />
+
 The zones give where, the projection gives which way, RSI gives how stretched — it's a directional read.
 # Stratum Fib Suite
 
