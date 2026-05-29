@@ -1,0 +1,295 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © Zeiierman
+
+//@version=6
+indicator("Fibonacci OTE Multi-TF (Zeiierman mod)", shorttitle="OTE MTF", overlay=true, max_bars_back=5000, max_labels_count=200, max_lines_count=200, max_boxes_count=200)
+
+// --------------------------------------------------------------------
+// Inputs
+// --------------------------------------------------------------------
+prd = input.int(10, minval=1, title="Structure Period")
+levelA = input.float(0.50, "Golden zone lower", step=0.001)
+levelB = input.float(0.618, "Golden zone upper", step=0.001)
+
+grpTf = "Timeframes"
+show5m  = input.bool(true,  "Show 5m zone",  group=grpTf)
+show15m = input.bool(true,  "Show 15m zone", group=grpTf)
+show1h  = input.bool(true,  "Show 1h zone",  group=grpTf)
+show4h  = input.bool(true,  "Show 4h zone",  group=grpTf)
+show1d  = input.bool(true,  "Show 1d zone",  group=grpTf)
+
+color5m  = input.color(color.new(color.teal, 75),   "5m color",  group=grpTf)
+color15m = input.color(color.new(color.blue, 80),   "15m color", group=grpTf)
+color1h  = input.color(color.new(color.purple, 80), "1h color",  group=grpTf)
+color4h  = input.color(color.new(color.orange, 80), "4h color",  group=grpTf)
+color1d  = input.color(color.new(color.red, 80),    "1d color",  group=grpTf)
+
+extendRight = input.bool(true, "Extend zones to the right")
+
+grpSwing = "Swing Quality Filter"
+minSwingAtrMult = input.float(1.0, "Min swing size (x ATR)", minval=0.0, step=0.1, group=grpSwing, tooltip="Only accept swings whose range is at least ATR * multiplier. Set 0 to disable.")
+maxSwingAgeBars = input.int(80, "Max swing age (bars on that TF)", minval=0, group=grpSwing, tooltip="Hide/ignore stale swings. Set 0 to disable.")
+
+// Prediction line settings
+grpPred = "Prediction"
+usePrediction = input.bool(true, "Show next-bar projection line", group=grpPred, tooltip="Projection recomputes every bar.")
+predLrLen = input.int(20, "Lookback for slope", minval=2, group=grpPred)
+predHorizonBars = input.int(1, "Forecast bars ahead (chart bars)", minval=1, maxval=3, group=grpPred, tooltip="1=next chart bar, 2=next two, etc.")
+predColor = input.color(color.rgb(0, 255, 128), "Line color", group=grpPred)
+predWidth = input.int(3, "Line width", minval=1, maxval=5, group=grpPred)
+predUseHtf = input.bool(true, "Blend HTF slope (1h)", group=grpPred)
+predHtfTf = input.timeframe("60", "HTF for blend", group=grpPred)
+predHtfLen = input.int(20, "HTF slope lookback", minval=2, group=grpPred)
+predBlend = input.float(0.5, "HTF weight (0-1)", minval=0.0, maxval=1.0, step=0.05, group=grpPred, tooltip="0 = only 5m slope, 1 = only HTF slope.")
+predAtrDampen = input.bool(true, "ATR cap move", group=grpPred)
+predAtrMult = input.float(0.8, "Max move in ATRs", minval=0.1, maxval=5, step=0.1, group=grpPred)
+predSmoothing = input.int(3, "Smooth forecast (bars)", minval=1, maxval=10, group=grpPred, tooltip="SMA smoothing on projected price")
+
+// 1m fib line settings
+grp1m = "1m Fib Line"
+show1mFib = input.bool(true, "Show 1m fib line", group=grp1m)
+prd1m = input.int(16, minval=1, title="1m Structure Period", group=grp1m)
+oneMinFibLevel = input.string("Mid", "Level", options=["Lower", "Mid", "Upper"], group=grp1m, tooltip="Pick which part of the 1m golden zone to plot.")
+oneMinColor = input.color(color.rgb(0, 255, 128), "Line color", group=grp1m)
+oneMinWidth = input.int(3, "Line width", minval=1, maxval=5, group=grp1m)
+oneMinExtend = input.bool(true, "Extend right", group=grp1m)
+
+// RSI badge settings
+grpRsi = "RSI Badge"
+showRsi = input.bool(true, "Show RSI badge", group=grpRsi)
+rsiLen = input.int(14, "RSI length", minval=2, group=grpRsi)
+rsiSrc = input.source(close, "Source", group=grpRsi)
+rsiTfInput = input.timeframe("", "RSI timeframe (blank = chart)", group=grpRsi, tooltip="Leave blank to use the chart's TF, or set e.g. 60 to read 1h RSI on a 5m chart.")
+rsiObLevel = input.float(70, "Overbought", group=grpRsi)
+rsiOsLevel = input.float(30, "Oversold", group=grpRsi)
+rsiPosInput = input.string("top_right", "Badge position", options=["top_left", "top_right", "top_center", "middle_right", "middle_left", "bottom_left", "bottom_right"], group=grpRsi)
+rsiTextSizeInput = input.string("normal", "Text size", options=["tiny", "small", "normal", "large", "huge"], group=grpRsi)
+
+// --------------------------------------------------------------------
+// Helpers
+// --------------------------------------------------------------------
+goldLow  = math.min(levelA, levelB)
+goldHigh = math.max(levelA, levelB)
+
+timeframes = array.from("5", "15", "60", "240", "D")
+shows      = array.from(show5m, show15m, show1h, show4h, show1d)
+colors     = array.from(color5m, color15m, color1h, color4h, color1d)
+
+tfCount = array.size(timeframes)
+
+var lastHi      = array.new_float(tfCount, na)
+var lastHiTime  = array.new_int(tfCount, na)
+var lastLo      = array.new_float(tfCount, na)
+var lastLoTime  = array.new_int(tfCount, na)
+var swingHi     = array.new_float(tfCount, na)
+var swingHiTime = array.new_int(tfCount, na)
+var swingLo     = array.new_float(tfCount, na)
+var swingLoTime = array.new_int(tfCount, na)
+var swingDir    = array.new_int(tfCount, 0)  // 1 = up swing (low->high), -1 = down swing (high->low)
+var zoneBoxes   = array.new_box(tfCount, na)
+
+var line predLine = na
+var float predPrice = na
+
+// 1m fib tracking
+var float oneSwingHi = na
+var float oneSwingLo = na
+var int oneSwingHiTime = na
+var int oneSwingLoTime = na
+var int oneDir = 0
+var line oneMinLine = na
+var float lastHi1m = na
+var int lastHiTime1m = na
+var float lastLo1m = na
+var int lastLoTime1m = na
+
+clamp(val, minv, maxv) =>
+    val < minv ? minv : val > maxv ? maxv : val
+
+// Single security-side call returns pivots, their actual occurrence times (time[p],
+// not the confirmation bar time), and ATR — all in one round trip.
+f_pivotData(p) =>
+    ph = ta.pivothigh(high, p, p)
+    pl = ta.pivotlow(low, p, p)
+    [ph, ta.valuewhen(not na(ph), time[p], 0), pl, ta.valuewhen(not na(pl), time[p], 0), ta.atr(14)]
+
+isSwingQualified(sh, sl, swingStartTime, tfAtr, tf) =>
+    rng = math.abs(sh - sl)
+    atrGateOff = minSwingAtrMult <= 0 or na(tfAtr) or tfAtr <= 0
+    atrOk = atrGateOff ? true : rng >= tfAtr * minSwingAtrMult
+    tfSeconds = timeframe.in_seconds(tf)
+    maxAgeMs = maxSwingAgeBars <= 0 or na(tfSeconds) or tfSeconds <= 0 ? na : tfSeconds * maxSwingAgeBars * 1000
+    ageOk = na(maxAgeMs) or na(swingStartTime) ? true : (time - swingStartTime) <= maxAgeMs
+    atrOk and ageOk
+
+calcZone(idx, tf, show, col) =>
+    // One security call covers both pivots, their actual occurrence times, and ATR.
+    [pHi, pHiTime, pLo, pLoTime, tfAtr] = request.security(syminfo.tickerid, tf, f_pivotData(prd))
+
+    // Track last pivot highs/lows
+    if not na(pHi)
+        array.set(lastHi, idx, pHi)
+        array.set(lastHiTime, idx, pHiTime)
+        if not na(array.get(lastLo, idx)) and array.get(lastLoTime, idx) < pHiTime
+            candidateLo = array.get(lastLo, idx)
+            candidateLoTime = array.get(lastLoTime, idx)
+            if isSwingQualified(pHi, candidateLo, candidateLoTime, tfAtr, tf)
+                array.set(swingLo, idx, candidateLo)
+                array.set(swingLoTime, idx, candidateLoTime)
+                array.set(swingHi, idx, pHi)
+                array.set(swingHiTime, idx, pHiTime)
+                array.set(swingDir, idx, 1)
+
+    if not na(pLo)
+        array.set(lastLo, idx, pLo)
+        array.set(lastLoTime, idx, pLoTime)
+        if not na(array.get(lastHi, idx)) and array.get(lastHiTime, idx) < pLoTime
+            candidateHi = array.get(lastHi, idx)
+            candidateHiTime = array.get(lastHiTime, idx)
+            if isSwingQualified(candidateHi, pLo, candidateHiTime, tfAtr, tf)
+                array.set(swingHi, idx, candidateHi)
+                array.set(swingHiTime, idx, candidateHiTime)
+                array.set(swingLo, idx, pLo)
+                array.set(swingLoTime, idx, pLoTime)
+                array.set(swingDir, idx, -1)
+
+    dir = array.get(swingDir, idx)
+    sh  = array.get(swingHi, idx)
+    sl  = array.get(swingLo, idx)
+    shTime = array.get(swingHiTime, idx)
+    slTime = array.get(swingLoTime, idx)
+    swingStartTime = dir == 1 ? slTime : shTime
+
+    canDraw = show and dir != 0 and not na(sh) and not na(sl) and not na(shTime) and not na(slTime) and isSwingQualified(sh, sl, swingStartTime, tfAtr, tf)
+    if canDraw
+        // Compute golden zone bounds
+        rng = sh - sl
+        upper = dir == 1 ? sh - rng * goldLow  : sl + rng * goldHigh
+        lower = dir == 1 ? sh - rng * goldHigh : sl + rng * goldLow
+
+        startTime = dir == 1 ? shTime : slTime
+        endTime   = time
+        existing = array.get(zoneBoxes, idx)
+        if na(existing)
+            b = box.new(startTime, upper, endTime, lower, xloc=xloc.bar_time, bgcolor=col, border_color=color.new(col, 40), extend=extendRight ? extend.right : extend.none, text=array.get(timeframes, idx), text_size=size.tiny, text_color=color.new(color.white, 0))
+            array.set(zoneBoxes, idx, b)
+        else
+            box.set_lefttop(existing, startTime, upper)
+            box.set_rightbottom(existing, endTime, lower)
+            box.set_bgcolor(existing, col)
+            box.set_border_color(existing, color.new(col, 40))
+            box.set_extend(existing, extendRight ? extend.right : extend.none)
+            box.set_text(existing, array.get(timeframes, idx))
+            box.set_text_color(existing, color.new(color.white, 0))
+            box.set_text_size(existing, size.tiny)
+    else
+        existing = array.get(zoneBoxes, idx)
+        if not na(existing)
+            box.set_bgcolor(existing, color.new(col, 100))
+            box.set_border_color(existing, color.new(col, 100))
+
+// --------------------------------------------------------------------
+// Main loop across timeframes
+// --------------------------------------------------------------------
+for i = 0 to tfCount - 1
+    calcZone(i, array.get(timeframes, i), array.get(shows, i), array.get(colors, i))
+
+// --------------------------------------------------------------------
+// 1m fib line (dynamic)
+// --------------------------------------------------------------------
+if show1mFib
+    [pHi1m, pHiTime1m, pLo1m, pLoTime1m, atr1m] = request.security(syminfo.tickerid, "1", f_pivotData(prd1m))
+
+    // Stage incoming pivots, then only promote them to the active swing when the
+    // opposite leg is older — prevents one direction from stretching forever.
+    if not na(pHi1m)
+        lastHi1m := pHi1m
+        lastHiTime1m := pHiTime1m
+        if not na(lastLo1m) and lastLoTime1m < pHiTime1m
+            oneSwingLo := lastLo1m
+            oneSwingLoTime := lastLoTime1m
+            oneSwingHi := pHi1m
+            oneSwingHiTime := pHiTime1m
+            oneDir := 1
+    if not na(pLo1m)
+        lastLo1m := pLo1m
+        lastLoTime1m := pLoTime1m
+        if not na(lastHi1m) and lastHiTime1m < pLoTime1m
+            oneSwingHi := lastHi1m
+            oneSwingHiTime := lastHiTime1m
+            oneSwingLo := pLo1m
+            oneSwingLoTime := pLoTime1m
+            oneDir := -1
+
+    haveSwing = oneDir != 0 and not na(oneSwingHi) and not na(oneSwingLo) and not na(oneSwingHiTime) and not na(oneSwingLoTime)
+    if haveSwing
+        rng1m = oneSwingHi - oneSwingLo
+        upper1m = oneDir == 1 ? oneSwingHi - rng1m * goldLow  : oneSwingLo + rng1m * goldHigh
+        lower1m = oneDir == 1 ? oneSwingHi - rng1m * goldHigh : oneSwingLo + rng1m * goldLow
+        fibVal = switch oneMinFibLevel
+            "Lower" => lower1m
+            "Upper" => upper1m
+            => (upper1m + lower1m) / 2
+
+        startTime1m = oneDir == 1 ? oneSwingHiTime : oneSwingLoTime
+        // give x2 some distance to avoid zero-length/vertical artifacts, then extend if desired
+        endTime1m = oneMinExtend ? startTime1m + 300000 : time  // +5 minutes in ms for visibility
+        if na(oneMinLine)
+            oneMinLine := line.new(startTime1m, fibVal, endTime1m, fibVal, xloc=xloc.bar_time, color=oneMinColor, width=oneMinWidth, extend=oneMinExtend ? extend.right : extend.none)
+        else
+            line.set_xy1(oneMinLine, startTime1m, fibVal)
+            line.set_xy2(oneMinLine, endTime1m, fibVal)
+            line.set_color(oneMinLine, oneMinColor)
+            line.set_width(oneMinLine, oneMinWidth)
+            line.set_extend(oneMinLine, oneMinExtend ? extend.right : extend.none)
+
+// --------------------------------------------------------------------
+// Prediction line — ta.* and request.security must run every bar so series
+// state stays correct; the drawing branch can still be gated by usePrediction.
+// --------------------------------------------------------------------
+predLrNow = ta.linreg(close, predLrLen, 0)
+predLrPrev = ta.linreg(close, predLrLen, 1)
+[predHtfNow, predHtfPrev] = request.security(syminfo.tickerid, predHtfTf, [ta.linreg(close, predHtfLen, 0), ta.linreg(close, predHtfLen, 1)])
+predAtrVal = ta.atr(14)
+
+predSlope5 = predLrNow - predLrPrev
+// Scale HTF slope into chart bars (not hard-coded 5m).
+predTfMult = timeframe.in_seconds(predHtfTf) / timeframe.in_seconds(timeframe.period)
+predSlopeHtf = predTfMult > 0 ? (predHtfNow - predHtfPrev) / predTfMult : 0.0
+predBlendSlope = predUseHtf ? predSlope5 * (1 - predBlend) + predSlopeHtf * predBlend : predSlope5
+predRawBase = close + predBlendSlope * predHorizonBars
+predMaxMove = predAtrVal * predAtrMult
+predRawCapped = predAtrDampen ? close + clamp(predRawBase - close, -predMaxMove, predMaxMove) : predRawBase
+predPriceSeries = ta.sma(predRawCapped, predSmoothing)
+
+if usePrediction
+    predPrice := predPriceSeries
+    if not na(predPrice)
+        futureX = bar_index + predHorizonBars
+        if na(predLine)
+            predLine := line.new(bar_index, predPrice, futureX, predPrice, color=predColor, width=predWidth, extend=extend.none, style=line.style_solid)
+        else
+            line.set_xy1(predLine, bar_index, predPrice)
+            line.set_xy2(predLine, futureX, predPrice)
+            line.set_color(predLine, predColor)
+            line.set_width(predLine, predWidth)
+
+// --------------------------------------------------------------------
+// RSI badge — small floating table so you don't need a separate RSI pane.
+// --------------------------------------------------------------------
+rsiTfResolved = rsiTfInput == "" ? timeframe.period : rsiTfInput
+rsiValue = request.security(syminfo.tickerid, rsiTfResolved, ta.rsi(rsiSrc, rsiLen))
+
+rsiPosition = rsiPosInput == "top_left" ? position.top_left : rsiPosInput == "top_right" ? position.top_right : rsiPosInput == "top_center" ? position.top_center : rsiPosInput == "middle_left" ? position.middle_left : rsiPosInput == "middle_right" ? position.middle_right : rsiPosInput == "bottom_left" ? position.bottom_left : position.bottom_right
+rsiTextSize = rsiTextSizeInput == "tiny" ? size.tiny : rsiTextSizeInput == "small" ? size.small : rsiTextSizeInput == "large" ? size.large : rsiTextSizeInput == "huge" ? size.huge : size.normal
+rsiColor = na(rsiValue) ? color.gray : rsiValue >= rsiObLevel ? color.new(color.red, 0) : rsiValue <= rsiOsLevel ? color.new(color.lime, 0) : color.new(color.white, 0)
+rsiLabel = "RSI " + str.tostring(rsiLen) + (rsiTfInput == "" ? "" : " · " + rsiTfInput)
+
+var table rsiTable = table.new(rsiPosition, 1, 2, bgcolor=color.new(color.black, 25), border_width=1, border_color=color.new(color.gray, 60), frame_color=color.new(color.gray, 60), frame_width=1)
+
+if showRsi and barstate.islast
+    table.cell(rsiTable, 0, 0, rsiLabel, text_color=color.new(color.silver, 0), text_size=rsiTextSize, bgcolor=color.new(color.black, 25))
+    table.cell(rsiTable, 0, 1, na(rsiValue) ? "—" : str.tostring(rsiValue, "#.##"), text_color=rsiColor, text_size=rsiTextSize, bgcolor=color.new(color.black, 10))
+else if not showRsi and barstate.islast
+    table.cell(rsiTable, 0, 0, "", bgcolor=color.new(color.black, 100))
+    table.cell(rsiTable, 0, 1, "", bgcolor=color.new(color.black, 100))
